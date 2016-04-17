@@ -8,6 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+
 	"testing"
 )
 
@@ -15,15 +18,18 @@ var defSessionKey = "DEFAULTSESSION"
 
 func TestLoginErrorIntegration(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Log("Got request: ", r)
 		w.WriteHeader(401)
 		w.Write([]byte(`{"code":"NEXT_LOGIN_INVALID_TIMESTAMP","message":"Something went wrong when logging in."}`))
 	})
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client := APIClient{URL: ts.URL}
+	sess := NewHttpSession(ts.URL, "2", "SERVICE", "dummypass")
+	// So we dont use the default logger
+	sess.ReqExecFn = WrapParseDefaultStatusCodes(NewDefaultRequestExecutorFn())
+	client := &APIClient{Session: sess}
 	_, err := client.Login()
-
 	assert.EqualError(t, err, "NEXT_LOGIN_INVALID_TIMESTAMP: Something went wrong when logging in.")
 }
 
@@ -591,8 +597,17 @@ func TestLoginIntegration(t *testing.T) {
 	client, ts := setup(t, "POST", "/2/login?auth=SECRET&service=TEST", "", loginJSON)
 	defer ts.Close()
 
-	client.Credentials = "SECRET"
-	client.Service = "TEST"
+	currSess, ok := client.Session.(*HttpSession)
+	if !ok {
+		assert.Fail(t, "Could not cast session", client.Session)
+	}
+	client.Session = &HttpSession{
+		BaseURL:     currSess.BaseURL,
+		Service:     "TEST",
+		credentials: "SECRET",
+		ReqGenFn:    NewDefaultRequestGeneratorFn(),
+		ReqExecFn:   WrapParseDefaultStatusCodes(NewDefaultRequestExecutorFn()),
+	}
 
 	if resp, err := client.Login(); err != nil {
 		t.Fatal(err)
@@ -614,8 +629,6 @@ func TestLoginIntegration(t *testing.T) {
 		assert.Equal("test", privFeed.Hostname)
 		assert.EqualValues(123, privFeed.Port)
 		assert.Equal(true, privFeed.Encrypted)
-
-		assert.Equal("test", client.SessionKey)
 	}
 }
 
@@ -953,10 +966,23 @@ func assertInstrument(assert *assert.Assertions, instrument *Instrument) {
 }
 
 func setupTestServer(t *testing.T, method, path, session string, stubData []byte) *httptest.Server {
+	var expPayload url.Values
+	expPath := path
+	if method == "PUT" || method == "POST" {
+		pathUrl, err := url.Parse(path)
+		if err != nil {
+			t.Fatalf("Unable to parse path %s: %+v", path, err)
+		}
+		expPayload = pathUrl.Query()
+		pathUrl.RawQuery = ""
+		expPath = pathUrl.String()
+	}
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Request: %+v", r)
 		if r.Method != method {
 			t.Fatal(errors.New(fmt.Sprintln("Method was expected to be:", method, "got:", r.Method)))
-		} else if r.RequestURI != path {
+		} else if r.RequestURI != expPath {
 			t.Fatal(errors.New(fmt.Sprintln("Path was expected to be:", path, "got:", r.RequestURI)))
 		} else if auth := r.Header.Get("Authorization"); auth != "" {
 			if decoded, err := base64.StdEncoding.DecodeString(auth[6:]); err != nil {
@@ -965,6 +991,13 @@ func setupTestServer(t *testing.T, method, path, session string, stubData []byte
 				t.Fatal(errors.New(fmt.Sprintln("Session was expected to be:", userpass, "got:", string(decoded))))
 			} else if userpass == ":" {
 				t.Fatal(errors.New(fmt.Sprintln("No pass provided")))
+			}
+		} else {
+			for key, val := range expPayload {
+				// FormValue only returns index 0, so we only compare with index 0
+				if val[0] != r.FormValue(key) {
+					t.Fatalf("Expected payload for '%s' to be '%+v', but was '%+v'", key, val, r.FormValue(key))
+				}
 			}
 		}
 
@@ -976,6 +1009,37 @@ func setupTestServer(t *testing.T, method, path, session string, stubData []byte
 
 func setup(t *testing.T, method, path, session, stubData string) (*APIClient, *httptest.Server) {
 	testServer := setupTestServer(t, method, path, session, []byte(stubData))
-	client := &APIClient{URL: testServer.URL, Service: NNSERVICE, Version: NNAPIVERSION, SessionKey: session}
+
+	httpExec := NewDefaultRequestExecutorFn()
+	// We will log on testing.T, so in case of an error, the whole request is shown
+	loggingExec := func(req *http.Request) (resp *http.Response, err error) {
+		dump, err2 := httputil.DumpRequestOut(req, true)
+		if err2 != nil {
+			t.Log(err2)
+		} else {
+			t.Log(string(dump))
+		}
+
+		resp, err = httpExec(req)
+		if resp != nil {
+			dump, err2 = httputil.DumpResponse(resp, true)
+			if err2 != nil {
+				t.Log(err2)
+			} else {
+				t.Log(string(dump))
+			}
+		}
+		return
+	}
+
+	sess := &HttpSession{
+		BaseURL:   fmt.Sprintf("%s/%s", testServer.URL, NNAPIVERSION),
+		Service:   NNSERVICE,
+		ReqGenFn:  NewDefaultRequestGeneratorFn(),
+		ReqExecFn: WrapParseDefaultStatusCodes(loggingExec),
+	}
+
+	client := &APIClient{Session: sess}
+
 	return client, testServer
 }
