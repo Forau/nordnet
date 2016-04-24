@@ -25,10 +25,10 @@ func TestLoginErrorIntegration(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	sess := NewHttpSession(ts.URL, "2", "SERVICE", "dummypass")
+	tr := NewHttpTransport(ts.URL, "2", "SERVICE", func() string { return "dummypass" })
 	// So we dont use the default logger
-	sess.ReqExecFn = WrapParseDefaultStatusCodes(NewDefaultRequestExecutorFn())
-	client := &APIClient{Session: sess}
+	tr.ReqExecFn = NewDefaultRequestExecutorFn()
+	client := &APIClient{Transport: tr}
 	_, err := client.Login()
 	assert.EqualError(t, err, "NEXT_LOGIN_INVALID_TIMESTAMP: Something went wrong when logging in.")
 }
@@ -597,16 +597,16 @@ func TestLoginIntegration(t *testing.T) {
 	client, ts := setup(t, "POST", "/2/login?auth=SECRET&service=TEST", "", loginJSON)
 	defer ts.Close()
 
-	currSess, ok := client.Session.(*HttpSession)
+	currTr, ok := client.Transport.(*HttpTransport)
 	if !ok {
-		assert.Fail(t, "Could not cast session", client.Session)
+		assert.Fail(t, "Could not cast transport", client.Transport)
 	}
-	client.Session = &HttpSession{
-		BaseURL:     currSess.BaseURL,
-		Service:     "TEST",
-		credentials: "SECRET",
-		ReqGenFn:    NewDefaultRequestGeneratorFn(),
-		ReqExecFn:   WrapParseDefaultStatusCodes(NewDefaultRequestExecutorFn()),
+	client.Transport = &HttpTransport{
+		BaseURL:    currTr.BaseURL,
+		Service:    "TEST",
+		credProvFn: func() string { return "SECRET" },
+		ReqGenFn:   DefaultRequestGeneratorFn,
+		ReqExecFn:  NewDefaultRequestExecutorFn(),
 	}
 
 	if resp, err := client.Login(); err != nil {
@@ -1032,14 +1032,14 @@ func setup(t *testing.T, method, path, session, stubData string) (*APIClient, *h
 		return
 	}
 
-	sess := &HttpSession{
+	tr := &HttpTransport{
 		BaseURL:   fmt.Sprintf("%s/%s", testServer.URL, NNAPIVERSION),
 		Service:   NNSERVICE,
-		ReqGenFn:  NewDefaultRequestGeneratorFn(),
-		ReqExecFn: WrapParseDefaultStatusCodes(loggingExec),
+		ReqGenFn:  DefaultRequestGeneratorFn,
+		ReqExecFn: loggingExec,
 	}
 
-	client := &APIClient{Session: sess}
+	client := &APIClient{Transport: tr}
 
 	return client, testServer
 }
