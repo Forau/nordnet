@@ -4,6 +4,7 @@ import (
 	"flag"
 	"github.com/Forau/nordnet/api"
 	"github.com/Forau/nordnet/api/rpc"
+	"github.com/Forau/nordnet/feed"
 
 	"log"
 
@@ -36,9 +37,9 @@ type Command struct {
 }
 
 func (c *Command) GetStr() string {
-  if len(c.argRest) == 0 {
-    log.Fatal("Not enough arguments for: ",c.String())
-  }
+	if len(c.argRest) == 0 {
+		log.Fatal("Not enough arguments for: ", c.String())
+	}
 	a := c.argRest[0]
 	c.argRest = c.argRest[1:]
 	return a
@@ -51,9 +52,9 @@ func (c *Command) GetNum() int64 {
 
 func (c *Command) GetPar() *api.Params {
 	r := api.Params{}
-  if len(c.argRest) & 1 != 0 {
-    log.Fatal("Need an odd number of arguments for params. Key Value.")
-  }
+	if len(c.argRest)&1 != 0 {
+		log.Fatal("Need an odd number of arguments for params. Key Value.")
+	}
 	for i := 0; i < len(c.argRest)-1; i += 2 {
 		r[c.argRest[i]] = c.argRest[i+1]
 	}
@@ -200,6 +201,78 @@ var CommandList = []Command{
 	{Name: "TradableInfo", Args: []ArgType{String}, Func: func(c *Command, a *api.APIClient) (interface{}, error) { return a.TradableInfo(c.GetStr()) }},
 	{Name: "TradableIntraday", Args: []ArgType{String}, Func: func(c *Command, a *api.APIClient) (interface{}, error) { return a.TradableIntraday(c.GetStr()) }},
 	{Name: "TradableTrades", Args: []ArgType{String}, Func: func(c *Command, a *api.APIClient) (interface{}, error) { return a.TradableTrades(c.GetStr()) }},
+	{Name: "PublicStream", Args: []ArgType{}, Func: openPublicStream},
+}
+
+// I would like to move this to the daemon too.
+func openPublicStream(c *Command, a *api.APIClient) (interface{}, error) {
+	login, err := a.Login()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Connecting to %s:%d", login.PublicFeed.Hostname, login.PublicFeed.Port)
+
+	pfeed, err := feed.NewPublicFeed(fmt.Sprintf("%s:%d", login.PublicFeed.Hostname, login.PublicFeed.Port))
+	if err != nil {
+		log.Fatal(err)
+	}
+	pfeed.Login(login.SessionKey, nil)
+
+	log.Printf("Logged in %+v", pfeed)
+
+	msgChan, errChan := pfeed.Dispatch()
+
+	err = pfeed.Subscribe(&feed.IndicatorArgs{T: "indicator", I: "SIX-IDX-DJI", M: "SIX"})
+	if err != nil {
+		fmt.Printf("Err %+v\n", err)
+	}
+
+	go func() {
+		fmt.Printf("Subscribe with: sub <T> <I> <M>. Example sub price 101 11\n")
+		fmt.Printf("Only indicator and news not supported, since this is a simple example\n")
+		for {
+			var typ string
+			var ins string
+			var mark int64
+
+			c, err := fmt.Fscanf(os.Stdin, "sub %s %s %d\n", &typ, &ins, &mark)
+			if err != nil {
+				fmt.Print("Error: ", err)
+			}
+			if c != 3 {
+				fmt.Print("Requires three arguments: type, instrument, market")
+			}
+			// We hust take PriceArgs for all of them
+			err = pfeed.Subscribe(&feed.PriceArgs{T: typ, I: ins, M: mark})
+			if err != nil {
+				fmt.Printf("Err %+v\n", err)
+			} else {
+				fmt.Printf("Ok\n")
+			}
+		}
+	}()
+
+	go func() {
+		var hbcount int64
+		for msg := range msgChan {
+			if msg.Type != "heartbeat" {
+				js, _ := json.Marshal(msg)
+				log.Print("%+v", string(js))
+			} else {
+				hbcount++
+				// Just log every 10:th
+				if (hbcount/10)*10 == hbcount {
+					log.Print("Heartbeat no ", hbcount)
+				}
+			}
+		}
+	}()
+	for msg := range errChan {
+		js, _ := json.Marshal(msg)
+		log.Print("ERROR: ", string(js))
+	}
+	return nil, nil
 }
 
 func main() {
@@ -208,15 +281,6 @@ func main() {
 		Transport: cli,
 	}
 
-	/*
-	  log.Printf("Cmd: %s", CommandList[0].String())
-
-	  a,e1 := apic.Accounts()
-	  log.Printf("Accounts: %+v %+v\n",a,e1)
-
-	  ti,e2 := apic.TradableInfo("11:101")
-	  log.Printf("TI: %+v %+v\n",ti,e2)
-	*/
 	args := flag.Args()
 	if len(args) == 0 {
 		flag.Usage()

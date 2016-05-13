@@ -56,7 +56,7 @@ func main() {
 	var tranportFn api.TransportFn
 	httpTransport := api.NewHttpTransport(*baseUrl, api.NNAPIVERSION, api.NNSERVICE, credentials)
 	tranportFn = func(method, path string, params *api.Params, res interface{}) error {
-    log.Printf("Calling %s, %s, %+v", method, path, params)
+		log.Printf("Calling %s, %s, %+v", method, path, params)
 		err := httpTransport.Perform(method, path, params, res)
 		if err != nil {
 			if apie, ok := err.(api.APIError); ok && apie.Code == "NEXT_INVALID_SESSION" {
